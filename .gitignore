@@ -1,0 +1,6 @@
+.env
+claves.txt
+__pycache__/
+*.pyc
+productos_cache.json
+info_cache.json
