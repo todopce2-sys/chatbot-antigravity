@@ -266,6 +266,22 @@ async def startup():
     except Exception as e:
         print(f"[WARN] Error cargando info institucional: {e}")
 
+    import asyncio
+
+    async def actualizar_cada_12h():
+        while True:
+            await asyncio.sleep(12 * 60 * 60)
+            try:
+                productos, cotizacion = cargar_o_actualizar_productos(forzar=True)
+                estado["productos"] = productos
+                estado["cotizacion"] = cotizacion
+                estado["info"] = cargar_info_institucional(forzar=True)
+                print(f"[AUTO] Actualización: {len(productos)} productos | Dólar: ${cotizacion:.0f}")
+            except Exception as e:
+                print(f"[WARN] Error en actualización automática: {e}")
+
+    asyncio.create_task(actualizar_cada_12h())
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
