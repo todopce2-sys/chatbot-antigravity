@@ -286,6 +286,16 @@ async def whatsapp_verify(request: Request):
     return PlainTextResponse("Forbidden", status_code=403)
 
 
+@app.get("/webhook")
+async def webhook_verify(request: Request):
+    """Verificación alternativa del webhook de Meta."""
+    params = dict(request.query_params)
+    if (params.get("hub.mode") == "subscribe" and
+            params.get("hub.verify_token") == WHATSAPP_VERIFY_TOKEN):
+        return PlainTextResponse(params.get("hub.challenge", ""))
+    return PlainTextResponse("Forbidden", status_code=403)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     html = CHAT_HTML.read_text(encoding="utf-8")
