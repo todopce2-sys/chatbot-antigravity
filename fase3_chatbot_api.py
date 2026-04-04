@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from twilio.rest import Client as TwilioClient
 
@@ -23,11 +23,9 @@ app = FastAPI(title="Chatbot Distribuciones San Luis")
 CHAT_HTML = BASE_DIR / "templates" / "chat.html"
 
 client = Anthropic()
-twilio_client = TwilioClient(
-    os.environ.get("TWILIO_ACCOUNT_SID"),
-    os.environ.get("TWILIO_AUTH_TOKEN"),
-)
-TWILIO_WA_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+META_TOKEN = os.environ.get("META_ACCESS_TOKEN", "")
+META_PHONE_ID = os.environ.get("META_PHONE_NUMBER_ID", "1045946858607234")
+META_API_URL = f"https://graph.facebook.com/v19.0/{META_PHONE_ID}/messages"
 BASE_URL = "https://distribucionessl.com/wp-json/wc/store/v1/products"
 CACHE_FILE = BASE_DIR / "productos_cache.json"
 INFO_CACHE_FILE = BASE_DIR / "info_cache.json"
@@ -357,19 +355,49 @@ async def status():
     }
 
 
+def enviar_meta(numero: str, texto: str):
+    """Envía un mensaje de texto via WhatsApp Cloud API de Meta."""
+    headers = {
+        "Authorization": f"Bearer {META_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": numero,
+        "type": "text",
+        "text": {"body": texto},
+    }
+    r = requests.post(META_API_URL, json=payload, headers=headers, timeout=15)
+    if not r.ok:
+        print(f"[ERROR meta] {r.status_code} {r.text}")
+
+
 @app.post("/whatsapp")
-async def whatsapp_webhook(
-    From: str = Form(...),
-    Body: str = Form(...),
-):
-    """Webhook que recibe mensajes de WhatsApp via Twilio."""
-    numero = From  # formato: whatsapp:+549...
-    mensaje = Body.strip()
+async def whatsapp_webhook(request: Request):
+    """Webhook que recibe mensajes de WhatsApp via Meta Cloud API."""
+    try:
+        data = await request.json()
+    except Exception:
+        return PlainTextResponse("ok")
+
+    # Extraer mensaje del payload de Meta
+    try:
+        entry = data["entry"][0]
+        change = entry["changes"][0]["value"]
+        # Ignorar notificaciones de estado (delivered, read, etc.)
+        if "messages" not in change:
+            return PlainTextResponse("ok")
+        msg = change["messages"][0]
+        if msg.get("type") != "text":
+            return PlainTextResponse("ok")
+        numero = msg["from"]
+        mensaje = msg["text"]["body"].strip()
+    except (KeyError, IndexError):
+        return PlainTextResponse("ok")
 
     if not mensaje:
         return PlainTextResponse("ok")
 
-    # Reutilizar el mismo motor de chat
     if numero not in sesiones:
         sesiones[numero] = []
 
@@ -400,12 +428,7 @@ async def whatsapp_webhook(
         if len(historial) > 40:
             sesiones[numero] = historial[-40:]
 
-        # Enviar respuesta por WhatsApp via Twilio
-        twilio_client.messages.create(
-            from_=TWILIO_WA_NUMBER,
-            to=numero,
-            body=texto,
-        )
+        enviar_meta(numero, texto)
     except Exception as e:
         print(f"[ERROR whatsapp] {e}")
 
