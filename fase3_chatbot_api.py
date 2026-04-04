@@ -22,7 +22,7 @@ app = FastAPI(title="Chatbot Distribuciones San Luis")
 CHAT_HTML = BASE_DIR / "templates" / "chat.html"
 
 client = Anthropic()
-META_TOKEN = os.environ.get("META_ACCESS_TOKEN", "")
+META_TOKEN = os.environ.get("META_ACCESS_TOKEN", "").strip()
 META_PHONE_ID = os.environ.get("META_PHONE_NUMBER_ID", "1045946858607234")
 META_API_URL = f"https://graph.facebook.com/v19.0/{META_PHONE_ID}/messages"
 BASE_URL = "https://distribucionessl.com/wp-json/wc/store/v1/products"
