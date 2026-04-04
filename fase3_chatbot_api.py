@@ -9,7 +9,6 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from twilio.rest import Client as TwilioClient
 
 def sanitize_str(text: str) -> str:
     """Elimina surrogates Unicode inválidos que rompen la serialización JSON."""
