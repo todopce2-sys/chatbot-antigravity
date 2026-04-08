@@ -47,6 +47,9 @@ estado = {
 # Historial por sesion { session_id: [mensajes] }
 sesiones: dict[str, list] = {}
 
+# IDs de mensajes ya procesados (anti-duplicados de Meta)
+mensajes_vistos: set[str] = set()
+
 
 # ---------------------------------------------------------------------------
 # Scraping de páginas institucionales
@@ -242,6 +245,8 @@ MODO REVENDEDOR: Si detectás intención de reventa, hablar de margen, rotación
 
 DERIVACIÓN A HUMANO: Si hay reclamo complejo, negociación fuera de política o el usuario lo pide.
 
+LONGITUD DE RESPUESTA: Máximo 3-4 oraciones por mensaje. Estás en WhatsApp, no escribiendo un email. Sin listas largas, sin encabezados. Si hay muchos productos, mencioná los 2-3 más relevantes.
+
 Respondé siempre en español, tono profesional pero cercano, nunca robótico.
 
 {info_section}"""
@@ -347,7 +352,7 @@ async def chat(request: Request):
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1024,
+            max_tokens=500,
             system=system_prompt(estado["cotizacion"], estado["info"]),
             messages=historial,
         )
@@ -407,11 +412,21 @@ async def whatsapp_webhook(request: Request):
             return PlainTextResponse("ok")
         numero = msg["from"]
         mensaje = msg["text"]["body"].strip()
+        msg_id = msg.get("id", "")
     except (KeyError, IndexError):
         return PlainTextResponse("ok")
 
     if not mensaje:
         return PlainTextResponse("ok")
+
+    # Anti-duplicados: ignorar si ya procesamos este mensaje
+    if msg_id and msg_id in mensajes_vistos:
+        return PlainTextResponse("ok")
+    if msg_id:
+        mensajes_vistos.add(msg_id)
+        # Limpiar el set si crece demasiado (evitar memory leak)
+        if len(mensajes_vistos) > 10000:
+            mensajes_vistos.clear()
 
     if numero not in sesiones:
         sesiones[numero] = []
@@ -433,7 +448,7 @@ async def whatsapp_webhook(request: Request):
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1024,
+            max_tokens=500,
             system=system_prompt(estado["cotizacion"], estado["info"]),
             messages=historial,
         )
