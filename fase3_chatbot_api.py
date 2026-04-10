@@ -26,7 +26,9 @@ META_TOKEN = os.environ.get("META_ACCESS_TOKEN", "").strip()
 META_PHONE_ID = os.environ.get("META_PHONE_NUMBER_ID", "1045946858607234")
 META_API_URL = f"https://graph.facebook.com/v19.0/{META_PHONE_ID}/messages"
 BASE_URL = "https://distribucionessl.com/wp-json/wc/store/v1/products"
+BASE_URL_CATEGORIAS = "https://distribucionessl.com/wp-json/wc/store/v1/products/categories"
 CACHE_FILE = BASE_DIR / "productos_cache.json"
+CACHE_FILE_CATEGORIAS = BASE_DIR / "categorias_cache.json"
 INFO_CACHE_FILE = BASE_DIR / "info_cache.json"
 
 # TodoPCE (Messenger / retail)
@@ -51,6 +53,7 @@ PAGINAS_INFO_TODOPCE = {
 # Estado global
 estado = {
     "productos": [],
+    "categorias": [],
     "cotizacion": 1404.0,
     "info": {},
     "productos_todopce": [],
@@ -202,6 +205,60 @@ def cargar_info_todopce(forzar: bool = False) -> dict:
     return info
 
 
+def descargar_categorias() -> list:
+    todas = []
+    pagina = 1
+    while True:
+        try:
+            r = requests.get(BASE_URL_CATEGORIAS, params={"per_page": 100, "page": pagina}, timeout=15)
+            if r.status_code != 200:
+                break
+            lote = r.json()
+            if not lote:
+                break
+            for c in lote:
+                if c.get("count", 0) > 0:  # solo categorías con productos
+                    todas.append({
+                        "nombre": c.get("name", ""),
+                        "slug": c.get("slug", ""),
+                        "url": c.get("link", ""),
+                        "count": c.get("count", 0),
+                    })
+            if len(lote) < 100:
+                break
+            pagina += 1
+        except Exception:
+            break
+    return todas
+
+
+def cargar_o_actualizar_categorias(forzar: bool = False) -> list:
+    if not forzar and CACHE_FILE_CATEGORIAS.exists():
+        with open(CACHE_FILE_CATEGORIAS, encoding="utf-8") as f:
+            return json.load(f)
+    categorias = descargar_categorias()
+    with open(CACHE_FILE_CATEGORIAS, "w", encoding="utf-8") as f:
+        json.dump(categorias, f, ensure_ascii=False, indent=2)
+    return categorias
+
+
+def buscar_categoria(pregunta: str, categorias: list) -> dict | None:
+    """Busca la categoría más relevante para la pregunta del usuario."""
+    texto = pregunta.lower()
+    palabras = [w for w in texto.split() if w not in PALABRAS_RUIDO and len(w) > 2]
+    if not palabras:
+        return None
+    mejor = None
+    mejor_puntaje = 0
+    for cat in categorias:
+        texto_cat = (cat["nombre"] + " " + cat["slug"]).lower()
+        puntaje = sum(1 for w in palabras if w in texto_cat)
+        if puntaje > mejor_puntaje:
+            mejor_puntaje = puntaje
+            mejor = cat
+    return mejor if mejor_puntaje > 0 else None
+
+
 def cargar_o_actualizar_productos(forzar: bool = False) -> tuple[list, float]:
     cotizacion = obtener_cotizacion()
     if not forzar and CACHE_FILE.exists():
@@ -280,46 +337,22 @@ def system_prompt(cotizacion: float, info: dict = None) -> str:
 
     return f"""Sos el asistente virtual de Distribuciones San Luis, distribuidor mayorista de tecnología en Argentina.
 
-ROL: Vendedor digital profesional + asesor comercial. No solo respondés: vendés.
+ROL: Orientar al cliente hacia la web y derivar consultas de compra al vendedor humano.
 
-IMPORTANTE SOBRE EL CATÁLOGO:
-- El sistema te provee los productos relevantes para cada consulta directamente en el mensaje
-- Cuando se trata de comparar precios (más económico, más barato, etc.), los productos ya vienen ordenados por precio de menor a mayor
-- Nunca digas que no tenés acceso al catálogo — los productos disponibles son exactamente los que aparecen en el contexto de cada mensaje
-- Si no aparece un producto en el contexto, ofrecé las opciones que sí tenés disponibles
+COMPORTAMIENTO PRINCIPAL:
+- Cuando el cliente pregunta por un producto o categoría, respondé con 1-2 oraciones y el link de la categoría correspondiente en la web para que explore el catálogo completo.
+- No listes productos individuales ni precios. Solo dirigí al cliente a la categoría.
+- Si el cliente quiere comprar, hacer un pedido, consultar precio final, stock, medios de pago o condiciones mayoristas → derivalo al WhatsApp de ventas: +54 2664583129
 
-REGLAS COMERCIALES:
+REGLAS:
 - Compra mínima: $80.000 ARS
-- Contacto WhatsApp para cerrar pedidos: +54 2664583129
 - Local físico: Rivadavia 1005, San Luis Capital, CP 5700
-- Cuando el cliente pregunte por dirección, horarios o cómo llegar, dar la dirección del local y sugerir confirmar horarios por WhatsApp
-- Precios en pesos argentinos usando cotización Banco Nación: ${cotizacion:.0f} por dólar
-- Mostrar siempre precio en ARS cuando esté disponible
-- Siempre incluir el link del producto cuando lo mencionés, como: "Ver producto: [nombre](url)"
-- Nunca inventar precios, stock ni promociones no confirmadas
-- Si no tenés el dato, decilo y ofrecé verificar
+- Precios en pesos argentinos, cotización Banco Nación: ${cotizacion:.0f} por dólar
+- Nunca inventar precios, stock ni promociones
 
-CLASIFICACIÓN DE INTENCIÓN (detectar en cada mensaje):
-- consulta_precio | consulta_tecnica | comparacion | stock | medios_pago | envios | reventa | cierre | reclamo | saludo
+LONGITUD: Máximo 2-3 oraciones. Directo y simple.
 
-TEMPERATURA DEL LEAD:
-- Frío: consulta general → educar, orientar, no presionar
-- Tibio: preguntas específicas → resolver objeciones, propuesta concreta
-- Caliente: pregunta precio/stock/pago → responder rápido, microcerrar, facilitar cierre
-
-ESTRUCTURA DE RESPUESTA COMERCIAL:
-1. Apertura natural
-2. Respuesta clara con precio si aplica
-3. Beneficio concreto
-4. Microcierre ("¿Querés que te pase disponibilidad y medios de pago?")
-
-MODO REVENDEDOR: Si detectás intención de reventa, hablar de margen, rotación y volumen.
-
-DERIVACIÓN A HUMANO: Si hay reclamo complejo, negociación fuera de política o el usuario lo pide.
-
-LONGITUD DE RESPUESTA: Máximo 3-4 oraciones por mensaje. Estás en WhatsApp, no escribiendo un email. Sin listas largas, sin encabezados. Si hay muchos productos, mencioná los 2-3 más relevantes.
-
-Respondé siempre en español, tono profesional pero cercano, nunca robótico.
+Respondé siempre en español, tono amigable y profesional.
 
 {info_section}"""
 
@@ -376,6 +409,11 @@ async def startup():
         print(f"[OK] Info institucional cargada ({len(estado['info'])} secciones)")
     except Exception as e:
         print(f"[WARN] Error cargando info institucional: {e}")
+    try:
+        estado["categorias"] = cargar_o_actualizar_categorias()
+        print(f"[OK] {len(estado['categorias'])} categorías cargadas")
+    except Exception as e:
+        print(f"[WARN] Error cargando categorías: {e}")
     import asyncio
 
     async def cargar_todopce_background():
@@ -402,6 +440,7 @@ async def startup():
                 estado["productos"] = productos
                 estado["cotizacion"] = cotizacion
                 estado["info"] = cargar_info_institucional(forzar=True)
+                estado["categorias"] = cargar_o_actualizar_categorias(forzar=True)
                 estado["productos_todopce"] = cargar_o_actualizar_productos_todopce(forzar=True)
                 estado["info_todopce"] = cargar_info_todopce(forzar=True)
                 print(f"[AUTO] Actualización: {len(productos)} San Luis | {len(estado['productos_todopce'])} TodoPCE | Dólar: ${cotizacion:.0f}")
@@ -555,23 +594,19 @@ async def whatsapp_webhook(request: Request):
         sesiones[numero] = []
 
     historial = sesiones[numero]
-    relevantes = buscar_productos(mensaje, estado["productos"])
+    categoria = buscar_categoria(mensaje, estado["categorias"])
 
-    if relevantes:
-        contexto = "\n".join(
-            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {sanitize_str(p['categoria'])} | {p['url']}"
-            for p in relevantes
-        )
-        contenido = f"{mensaje}\n\n[Productos relevantes]\n{contexto}"
+    if categoria:
+        contenido = f"{mensaje}\n\n[Categoría encontrada: {categoria['nombre']} | URL: {categoria['url']}]"
     else:
-        contenido = f"{mensaje}\n\n[Sin productos específicos. Sugerir contacto por WhatsApp si corresponde.]"
+        contenido = f"{mensaje}\n\n[Sin categoría específica. Si es consulta de compra, derivar al WhatsApp +54 2664583129.]"
 
     historial.append({"role": "user", "content": contenido})
 
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=500,
+            max_tokens=300,
             system=system_prompt(estado["cotizacion"], estado["info"]),
             messages=historial,
         )
