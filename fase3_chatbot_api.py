@@ -131,6 +131,8 @@ def descargar_productos(cotizacion: float) -> list:
             if not lote:
                 break
             for p in lote:
+                if not p.get("is_in_stock", True):
+                    continue
                 precio_raw = p.get("prices", {}).get("price", "")
                 todos.append({
                     "nombre": p.get("name", "Sin nombre"),
@@ -166,6 +168,8 @@ def descargar_productos_todopce() -> list:
             if not lote:
                 break
             for p in lote:
+                if not p.get("is_in_stock", True):
+                    continue
                 precio_raw = p.get("prices", {}).get("price", "")
                 todos.append({
                     "nombre": p.get("name", "Sin nombre"),
