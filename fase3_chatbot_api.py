@@ -598,11 +598,17 @@ async def whatsapp_webhook(request: Request):
     categoria = buscar_categoria(mensaje, estado["categorias"])
 
     if categoria:
-        contenido = f"{mensaje}\n\n[Categoría encontrada: {categoria['nombre']} | URL: {categoria['url']}]"
-    else:
-        contenido = f"{mensaje}\n\n[Sin categoría específica. Si es consulta de compra, derivar al WhatsApp +54 2664583129.]"
+        # Respuesta directa sin pasar por Claude — garantiza URL correcta y ahorra tokens
+        texto = (
+            f"Podés ver todos los *{categoria['nombre']}* disponibles acá:\n"
+            f"{categoria['url']}\n\n"
+            f"Para consultar precios, stock o hacer un pedido mayorista escribinos al WhatsApp: +54 2664583129 💬"
+        )
+        enviar_meta(numero, texto)
+        return PlainTextResponse("ok")
 
-    historial.append({"role": "user", "content": contenido})
+    # Sin categoría: usar Claude para respuesta general
+    historial.append({"role": "user", "content": mensaje})
 
     try:
         respuesta = client.messages.create(
