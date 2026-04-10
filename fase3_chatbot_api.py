@@ -538,7 +538,7 @@ async def chat(request: Request):
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=500,
+            max_tokens=400,
             system=system_prompt(estado["cotizacion"], estado["info"]),
             messages=historial,
         )
@@ -634,7 +634,7 @@ async def whatsapp_webhook(request: Request):
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=500,
+            max_tokens=400,
             system=system_prompt(estado["cotizacion"], estado["info"]),
             messages=historial,
         )
@@ -731,7 +731,7 @@ async def messenger_webhook(request: Request):
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=500,
+            max_tokens=400,
             system=system_prompt_messenger(estado["info_todopce"]),
             messages=historial,
         )
