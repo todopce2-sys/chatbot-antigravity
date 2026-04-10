@@ -29,12 +29,23 @@ BASE_URL = "https://distribucionessl.com/wp-json/wc/store/v1/products"
 CACHE_FILE = BASE_DIR / "productos_cache.json"
 INFO_CACHE_FILE = BASE_DIR / "info_cache.json"
 
+# TodoPCE (Messenger / retail)
+BASE_URL_TODOPCE = "https://todopce.com.ar/wp-json/wc/store/v1/products"
+CACHE_FILE_TODOPCE = BASE_DIR / "productos_cache_todopce.json"
+INFO_CACHE_FILE_TODOPCE = BASE_DIR / "info_cache_todopce.json"
+META_PAGE_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "").strip()
+MESSENGER_API_URL = "https://graph.facebook.com/v19.0/me/messages"
+
 # Páginas a scrapear para información institucional
-# Configurable: cambiar estas URLs para usar el chatbot en otro sitio
 PAGINAS_INFO = {
     "contacto":    "https://distribucionessl.com/our-contacts/",
     "envios":      "https://distribucionessl.com/delivery-return-2/",
     "locales":     "https://distribucionessl.com/stores/",
+}
+
+PAGINAS_INFO_TODOPCE = {
+    "contacto":  "https://todopce.com.ar/contacto/",
+    "envios":    "https://todopce.com.ar/envios/",
 }
 
 # Estado global
@@ -42,6 +53,8 @@ estado = {
     "productos": [],
     "cotizacion": 1404.0,
     "info": {},
+    "productos_todopce": [],
+    "info_todopce": {},
 }
 
 # Historial por sesion { session_id: [mensajes] }
@@ -128,6 +141,65 @@ def descargar_productos(cotizacion: float) -> list:
         except Exception:
             break
     return todos
+
+
+def convertir_precio_ars(precio_raw: str) -> str:
+    """Convierte precio en centavos ARS a pesos formateados."""
+    try:
+        return f"${int(precio_raw) / 100:,.0f} ARS"
+    except Exception:
+        return "Consultar precio"
+
+
+def descargar_productos_todopce() -> list:
+    todos = []
+    pagina = 1
+    while True:
+        try:
+            r = requests.get(BASE_URL_TODOPCE, params={"per_page": 100, "page": pagina}, timeout=15)
+            if r.status_code != 200:
+                break
+            lote = r.json()
+            if not lote:
+                break
+            for p in lote:
+                precio_raw = p.get("prices", {}).get("price", "")
+                todos.append({
+                    "nombre": p.get("name", "Sin nombre"),
+                    "precio": convertir_precio_ars(precio_raw) if precio_raw else "Consultar precio",
+                    "categoria": ", ".join(c["name"] for c in p.get("categories", [])),
+                    "url": p.get("permalink", ""),
+                })
+            if len(lote) < 100:
+                break
+            pagina += 1
+        except Exception:
+            break
+    return todos
+
+
+def cargar_o_actualizar_productos_todopce(forzar: bool = False) -> list:
+    if not forzar and CACHE_FILE_TODOPCE.exists():
+        with open(CACHE_FILE_TODOPCE, encoding="utf-8") as f:
+            return json.load(f)
+    productos = descargar_productos_todopce()
+    with open(CACHE_FILE_TODOPCE, "w", encoding="utf-8") as f:
+        json.dump(productos, f, ensure_ascii=False, indent=2)
+    return productos
+
+
+def cargar_info_todopce(forzar: bool = False) -> dict:
+    if not forzar and INFO_CACHE_FILE_TODOPCE.exists():
+        with open(INFO_CACHE_FILE_TODOPCE, encoding="utf-8") as f:
+            return json.load(f)
+    print("Descargando páginas institucionales TodoPCE...")
+    info = {}
+    for nombre, url in PAGINAS_INFO_TODOPCE.items():
+        info[nombre] = scrape_pagina(url)
+        print(f"  [{nombre}] OK")
+    with open(INFO_CACHE_FILE_TODOPCE, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+    return info
 
 
 def cargar_o_actualizar_productos(forzar: bool = False) -> tuple[list, float]:
@@ -252,6 +324,40 @@ Respondé siempre en español, tono profesional pero cercano, nunca robótico.
 {info_section}"""
 
 
+def system_prompt_messenger(info: dict = None) -> str:
+    if info:
+        secciones = "\n\n".join(
+            f"=== {nombre.upper()} ===\n{contenido}"
+            for nombre, contenido in info.items()
+            if contenido and not contenido.startswith("[No disponible")
+        )
+        info_section = f"\n# INFORMACIÓN DEL SITIO\n{secciones}" if secciones else ""
+    else:
+        info_section = ""
+
+    return f"""Sos el asistente virtual de TodoPCE, tienda de tecnología en Argentina para consumidores finales.
+
+ROL: Asesor de ventas amigable y directo. Ayudás a la gente a elegir el producto que necesita.
+
+IMPORTANTE SOBRE EL CATÁLOGO:
+- Los productos relevantes para cada consulta aparecen directamente en el mensaje
+- Nunca digas que no tenés acceso al catálogo — los productos disponibles son los que aparecen en el contexto
+- Si no aparece un producto, ofrecé las opciones que sí tenés
+
+REGLAS COMERCIALES:
+- Sin compra mínima — cualquier persona puede comprar
+- Precios en pesos argentinos (ARS), ya están actualizados
+- Contacto WhatsApp para consultas y pedidos: +54 2664583129
+- Siempre incluir el link del producto cuando lo mencionés: "Ver producto: [nombre](url)"
+- Nunca inventar precios, stock ni promociones
+
+LONGITUD DE RESPUESTA: Máximo 3-4 oraciones por mensaje. Estás en Messenger, no escribiendo un email. Sin listas largas. Si hay muchos productos, mencioná los 2-3 más relevantes.
+
+Respondé siempre en español, tono amigable y cercano, nunca robótico.
+
+{info_section}"""
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -270,8 +376,23 @@ async def startup():
         print(f"[OK] Info institucional cargada ({len(estado['info'])} secciones)")
     except Exception as e:
         print(f"[WARN] Error cargando info institucional: {e}")
-
     import asyncio
+
+    async def cargar_todopce_background():
+        """Carga datos de TodoPCE en background para no bloquear el startup."""
+        await asyncio.sleep(5)
+        try:
+            estado["productos_todopce"] = cargar_o_actualizar_productos_todopce()
+            print(f"[OK] {len(estado['productos_todopce'])} productos TodoPCE cargados")
+        except Exception as e:
+            print(f"[WARN] Error cargando productos TodoPCE: {e}")
+        try:
+            estado["info_todopce"] = cargar_info_todopce()
+            print(f"[OK] Info TodoPCE cargada ({len(estado['info_todopce'])} secciones)")
+        except Exception as e:
+            print(f"[WARN] Error cargando info TodoPCE: {e}")
+
+    asyncio.create_task(cargar_todopce_background())
 
     async def actualizar_cada_12h():
         while True:
@@ -281,7 +402,9 @@ async def startup():
                 estado["productos"] = productos
                 estado["cotizacion"] = cotizacion
                 estado["info"] = cargar_info_institucional(forzar=True)
-                print(f"[AUTO] Actualización: {len(productos)} productos | Dólar: ${cotizacion:.0f}")
+                estado["productos_todopce"] = cargar_o_actualizar_productos_todopce(forzar=True)
+                estado["info_todopce"] = cargar_info_todopce(forzar=True)
+                print(f"[AUTO] Actualización: {len(productos)} San Luis | {len(estado['productos_todopce'])} TodoPCE | Dólar: ${cotizacion:.0f}")
             except Exception as e:
                 print(f"[WARN] Error en actualización automática: {e}")
 
@@ -461,6 +584,103 @@ async def whatsapp_webhook(request: Request):
         enviar_meta(numero, texto)
     except Exception as e:
         print(f"[ERROR whatsapp] {e}")
+
+    return PlainTextResponse("ok")
+
+
+def enviar_messenger(psid: str, texto: str):
+    """Envía un mensaje de texto via Messenger API."""
+    headers = {
+        "Authorization": f"Bearer {META_PAGE_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "recipient": {"id": psid},
+        "message": {"text": texto},
+    }
+    r = requests.post(MESSENGER_API_URL, json=payload, headers=headers, timeout=15)
+    if not r.ok:
+        print(f"[ERROR messenger] {r.status_code} {r.text}")
+
+
+@app.get("/messenger")
+async def messenger_verify(request: Request):
+    """Verificación del webhook de Messenger."""
+    params = dict(request.query_params)
+    if (params.get("hub.mode") == "subscribe" and
+            params.get("hub.verify_token") == WHATSAPP_VERIFY_TOKEN):
+        return PlainTextResponse(params.get("hub.challenge", ""))
+    return PlainTextResponse("Forbidden", status_code=403)
+
+
+@app.post("/messenger")
+async def messenger_webhook(request: Request):
+    """Webhook que recibe mensajes de Facebook Messenger."""
+    try:
+        data = await request.json()
+    except Exception:
+        return PlainTextResponse("ok")
+
+    try:
+        entry = data["entry"][0]
+        messaging = entry["messaging"][0]
+        psid = messaging["sender"]["id"]
+        if "message" not in messaging:
+            return PlainTextResponse("ok")
+        msg = messaging["message"]
+        # Ignorar mensajes del propio bot (eco)
+        if msg.get("is_echo"):
+            return PlainTextResponse("ok")
+        msg_id = msg.get("mid", "")
+        mensaje = msg.get("text", "").strip()
+    except (KeyError, IndexError):
+        return PlainTextResponse("ok")
+
+    if not mensaje:
+        return PlainTextResponse("ok")
+
+    # Anti-duplicados
+    if msg_id and msg_id in mensajes_vistos:
+        return PlainTextResponse("ok")
+    if msg_id:
+        mensajes_vistos.add(msg_id)
+        if len(mensajes_vistos) > 10000:
+            mensajes_vistos.clear()
+
+    session_key = f"messenger_{psid}"
+    if session_key not in sesiones:
+        sesiones[session_key] = []
+
+    historial = sesiones[session_key]
+    relevantes = buscar_productos(mensaje, estado["productos_todopce"])
+
+    if relevantes:
+        contexto = "\n".join(
+            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {sanitize_str(p['categoria'])} | {p['url']}"
+            for p in relevantes
+        )
+        contenido = f"{mensaje}\n\n[Productos relevantes]\n{contexto}"
+    else:
+        contenido = f"{mensaje}\n\n[Sin productos específicos. Sugerir contacto por WhatsApp si corresponde.]"
+
+    historial.append({"role": "user", "content": contenido})
+
+    try:
+        respuesta = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            system=system_prompt_messenger(estado["info_todopce"]),
+            messages=historial,
+        )
+        texto = respuesta.content[0].text
+        historial.append({"role": "assistant", "content": texto})
+
+        if len(historial) > 40:
+            sesiones[session_key] = historial[-40:]
+
+        enviar_messenger(psid, texto)
+    except Exception as e:
+        print(f"[ERROR messenger] {e}")
 
     return PlainTextResponse("ok")
 
