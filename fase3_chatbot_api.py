@@ -337,23 +337,46 @@ def system_prompt(cotizacion: float, info: dict = None) -> str:
 
     return f"""Sos el asistente virtual de Distribuciones San Luis, distribuidor mayorista de tecnología en Argentina.
 
-ROL: Orientar al cliente hacia la web y derivar consultas de compra al vendedor humano.
+ROL: Vendedor digital profesional + asesor comercial. No solo respondés: vendés.
 
-COMPORTAMIENTO PRINCIPAL:
-- Cuando el cliente pregunta por un producto o categoría, respondé con 1-2 oraciones e incluí SIEMPRE el link usando EXACTAMENTE la URL que aparece en el contexto del mensaje (campo URL). Nunca construyas ni inventes URLs.
-- Formato del link: [nombre de la categoría](URL exacta del contexto)
-- No listes productos individuales ni precios. Solo dirigí al cliente a la categoría con su link.
-- Si el cliente quiere comprar, hacer un pedido, consultar precio final, stock, medios de pago o condiciones mayoristas → derivalo al WhatsApp de ventas: +54 2664583129
+IMPORTANTE SOBRE EL CATÁLOGO:
+- El sistema te provee los productos relevantes para cada consulta directamente en el mensaje
+- Cuando se trata de comparar precios (más económico, más barato, etc.), los productos ya vienen ordenados por precio de menor a mayor
+- Nunca digas que no tenés acceso al catálogo — los productos disponibles son exactamente los que aparecen en el contexto de cada mensaje
+- Si no aparece un producto en el contexto, ofrecé las opciones que sí tenés disponibles
 
-REGLAS:
+REGLAS COMERCIALES:
 - Compra mínima: $80.000 ARS
+- Contacto WhatsApp para cerrar pedidos: +54 2664583129
 - Local físico: Rivadavia 1005, San Luis Capital, CP 5700
-- Precios en pesos argentinos, cotización Banco Nación: ${cotizacion:.0f} por dólar
-- Nunca inventar precios, stock ni promociones
+- Cuando el cliente pregunte por dirección, horarios o cómo llegar, dar la dirección del local y sugerir confirmar horarios por WhatsApp
+- Precios en pesos argentinos usando cotización Banco Nación: ${cotizacion:.0f} por dólar
+- Mostrar siempre precio en ARS cuando esté disponible
+- Siempre incluir el link del producto cuando lo mencionés, como: Ver producto: nombre (url)
+- Nunca inventar precios, stock ni promociones no confirmadas
+- Si no tenés el dato, decilo y ofrecé verificar
 
-LONGITUD: Máximo 2-3 oraciones. Directo y simple.
+CLASIFICACIÓN DE INTENCIÓN (detectar en cada mensaje):
+- consulta_precio | consulta_tecnica | comparacion | stock | medios_pago | envios | reventa | cierre | reclamo | saludo
 
-Respondé siempre en español, tono amigable y profesional.
+TEMPERATURA DEL LEAD:
+- Frío: consulta general → educar, orientar, no presionar
+- Tibio: preguntas específicas → resolver objeciones, propuesta concreta
+- Caliente: pregunta precio/stock/pago → responder rápido, microcerrar, facilitar cierre
+
+ESTRUCTURA DE RESPUESTA COMERCIAL:
+1. Apertura natural
+2. Respuesta clara con precio si aplica
+3. Beneficio concreto
+4. Microcierre ("¿Querés que te pase disponibilidad y medios de pago?")
+
+MODO REVENDEDOR: Si detectás intención de reventa, hablar de margen, rotación y volumen.
+
+DERIVACIÓN A HUMANO: Si hay reclamo complejo, negociación fuera de política o el usuario lo pide.
+
+LONGITUD DE RESPUESTA: Máximo 3-4 oraciones por mensaje. Estás en WhatsApp, no escribiendo un email. Sin listas largas, sin encabezados. Si hay muchos productos, mencioná los 2-3 más relevantes.
+
+Respondé siempre en español, tono profesional pero cercano, nunca robótico.
 
 {info_section}"""
 
@@ -595,25 +618,23 @@ async def whatsapp_webhook(request: Request):
         sesiones[numero] = []
 
     historial = sesiones[numero]
-    categoria = buscar_categoria(mensaje, estado["categorias"])
+    relevantes = buscar_productos(mensaje, estado["productos"])
 
-    if categoria:
-        # Respuesta directa sin pasar por Claude — garantiza URL correcta y ahorra tokens
-        texto = (
-            f"Podés ver todos los *{categoria['nombre']}* disponibles acá:\n"
-            f"{categoria['url']}\n\n"
-            f"Para consultar precios, stock o hacer un pedido mayorista escribinos al WhatsApp: +54 2664583129 💬"
+    if relevantes:
+        contexto = "\n".join(
+            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {sanitize_str(p['categoria'])} | {p['url']}"
+            for p in relevantes
         )
-        enviar_meta(numero, texto)
-        return PlainTextResponse("ok")
+        contenido = f"{mensaje}\n\n[Productos relevantes]\n{contexto}"
+    else:
+        contenido = f"{mensaje}\n\n[Sin productos específicos. Sugerir contacto por WhatsApp si corresponde.]"
 
-    # Sin categoría: usar Claude para respuesta general
-    historial.append({"role": "user", "content": mensaje})
+    historial.append({"role": "user", "content": contenido})
 
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=300,
+            max_tokens=500,
             system=system_prompt(estado["cotizacion"], estado["info"]),
             messages=historial,
         )
