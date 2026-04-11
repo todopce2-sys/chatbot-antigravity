@@ -171,11 +171,15 @@ def descargar_productos_todopce() -> list:
                 if not p.get("is_in_stock", True):
                     continue
                 precio_raw = p.get("prices", {}).get("price", "")
+                # Limpiar descripción corta de HTML
+                desc_raw = p.get("short_description", "") or p.get("description", "")
+                desc = BeautifulSoup(desc_raw, "html.parser").get_text(separator=" ", strip=True)[:300]
                 todos.append({
                     "nombre": p.get("name", "Sin nombre"),
                     "precio": convertir_precio_ars(precio_raw) if precio_raw else "Consultar precio",
                     "categoria": ", ".join(c["name"] for c in p.get("categories", [])),
                     "url": p.get("permalink", ""),
+                    "descripcion": desc,
                 })
             if len(lote) < 100:
                 break
@@ -398,23 +402,29 @@ def system_prompt_messenger(info: dict = None) -> str:
 
     return f"""Sos el asistente virtual de TodoPCE, tienda de tecnología en Argentina para consumidores finales.
 
-ROL: Asesor de ventas amigable y directo. Ayudás a la gente a elegir el producto que necesita.
+ROL: Asesor de ventas amigable. Respondés consultas sobre productos, precios, características y envíos. Para cerrar una venta o atención personalizada, derivás al asesor humano.
 
-IMPORTANTE SOBRE EL CATÁLOGO:
-- Los productos relevantes para cada consulta aparecen directamente en el mensaje
-- Nunca digas que no tenés acceso al catálogo — los productos disponibles son los que aparecen en el contexto
-- Si no aparece un producto, ofrecé las opciones que sí tenés
+CATÁLOGO:
+- Los productos relevantes aparecen en el contexto del mensaje con nombre, precio, URL y descripción
+- Usá la descripción para responder preguntas sobre características del producto
+- Siempre incluí el link del producto: nombre (url)
+- Nunca inventar precios, stock ni características
 
-REGLAS COMERCIALES:
-- Sin compra mínima — cualquier persona puede comprar
-- Precios en pesos argentinos (ARS), ya están actualizados
-- Contacto WhatsApp para consultas y pedidos: +54 2664583129
-- Siempre incluir el link del producto cuando lo mencionés: "Ver producto: [nombre](url)"
-- Nunca inventar precios, stock ni promociones
+ENVÍOS:
+- Sí realizamos envíos a todo el país
+- Para consultar costo y tiempo de envío a su localidad, derivar al WhatsApp: +54 2664583129
 
-LONGITUD DE RESPUESTA: Máximo 3-4 oraciones por mensaje. Estás en Messenger, no escribiendo un email. Sin listas largas. Si hay muchos productos, mencioná los 2-3 más relevantes.
+ASESOR HUMANO:
+- Si el cliente quiere comprar, necesita factura, tiene una consulta compleja o pide atención personalizada → derivar al WhatsApp: +54 2664583129
 
-Respondé siempre en español, tono amigable y cercano, nunca robótico.
+REGLAS:
+- Sin compra mínima
+- Precios en pesos argentinos (ARS)
+- Nunca inventar datos
+
+LONGITUD: Máximo 3-4 oraciones. Estás en Messenger. Sin listas largas. Si hay varios productos mencioná los 2 más relevantes.
+
+Respondé siempre en español, tono amigable y cercano.
 
 {info_section}"""
 
@@ -723,7 +733,8 @@ async def messenger_webhook(request: Request):
 
     if relevantes:
         contexto = "\n".join(
-            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {sanitize_str(p['categoria'])} | {p['url']}"
+            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {p['url']}"
+            + (f" | {sanitize_str(p['descripcion'])}" if p.get("descripcion") else "")
             for p in relevantes
         )
         contenido = f"{mensaje}\n\n[Productos relevantes]\n{contexto}"
