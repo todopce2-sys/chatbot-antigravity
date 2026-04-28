@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+
 def sanitize_str(text: str) -> str:
     """Elimina surrogates Unicode inválidos que rompen la serialización JSON."""
     return re.sub(r'[\ud800-\udfff]', '', text)
@@ -18,49 +19,32 @@ def sanitize_str(text: str) -> str:
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
 
-app = FastAPI(title="Chatbot Distribuciones San Luis")
+app = FastAPI(title="DSL Sistemas – Agente de Soporte Técnico")
 CHAT_HTML = BASE_DIR / "templates" / "chat.html"
 
 client = Anthropic()
 META_TOKEN = os.environ.get("META_ACCESS_TOKEN", "").strip()
 META_PHONE_ID = os.environ.get("META_PHONE_NUMBER_ID", "1045946858607234")
 META_API_URL = f"https://graph.facebook.com/v19.0/{META_PHONE_ID}/messages"
-BASE_URL = "https://distribucionessl.com/wp-json/wc/store/v1/products"
-BASE_URL_CATEGORIAS = "https://distribucionessl.com/wp-json/wc/store/v1/products/categories"
-CACHE_FILE = BASE_DIR / "productos_cache.json"
-CACHE_FILE_CATEGORIAS = BASE_DIR / "categorias_cache.json"
-INFO_CACHE_FILE = BASE_DIR / "info_cache.json"
-
-# TodoPCE (Messenger / retail)
-BASE_URL_TODOPCE = "https://todopce.com.ar/wp-json/wc/store/v1/products"
-CACHE_FILE_TODOPCE = BASE_DIR / "productos_cache_todopce.json"
-INFO_CACHE_FILE_TODOPCE = BASE_DIR / "info_cache_todopce.json"
 META_PAGE_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "").strip()
 MESSENGER_API_URL = "https://graph.facebook.com/v19.0/me/messages"
+WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "antigravity2024")
 
-# Páginas a scrapear para información institucional
-PAGINAS_INFO = {
-    "contacto":    "https://distribucionessl.com/our-contacts/",
-    "envios":      "https://distribucionessl.com/delivery-return-2/",
-    "locales":     "https://distribucionessl.com/stores/",
-}
+CONOCIMIENTO_CACHE = BASE_DIR / "dsl_conocimiento.json"
 
-PAGINAS_INFO_TODOPCE = {
-    "contacto":  "https://todopce.com.ar/contacto/",
-    "envios":    "https://todopce.com.ar/envios/",
+# Páginas del sitio web de DSL Sistemas a indexar como base de conocimiento
+PAGINAS_DSL = {
+    "inicio":    "https://www.dslsistemas.com.ar",
+    "servicios": "https://www.dslsistemas.com.ar/servicios",
+    "contacto":  "https://www.dslsistemas.com.ar/contacto",
 }
 
 # Estado global
 estado = {
-    "productos": [],
-    "categorias": [],
-    "cotizacion": 1404.0,
-    "info": {},
-    "productos_todopce": [],
-    "info_todopce": {},
+    "conocimiento": {},
 }
 
-# Historial por sesion { session_id: [mensajes] }
+# Historial por sesión { session_id: [mensajes] }
 sesiones: dict[str, list] = {}
 
 # IDs de mensajes ya procesados (anti-duplicados de Meta)
@@ -68,365 +52,95 @@ mensajes_vistos: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
-# Scraping de páginas institucionales
+# Scraping y base de conocimiento
 # ---------------------------------------------------------------------------
 
-def scrape_pagina(url: str, max_chars: int = 3000) -> str:
+def scrape_pagina(url: str, max_chars: int = 5000) -> str:
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         soup = BeautifulSoup(r.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
         texto = soup.get_text(separator="\n", strip=True)
-        # Limpiar líneas vacías repetidas
         lineas = [l for l in texto.splitlines() if l.strip()]
         return "\n".join(lineas)[:max_chars]
     except Exception as e:
         return f"[No disponible: {e}]"
 
 
-def cargar_info_institucional(forzar: bool = False) -> dict:
-    if not forzar and INFO_CACHE_FILE.exists():
-        with open(INFO_CACHE_FILE, encoding="utf-8") as f:
+def cargar_conocimiento(forzar: bool = False) -> dict:
+    if not forzar and CONOCIMIENTO_CACHE.exists():
+        with open(CONOCIMIENTO_CACHE, encoding="utf-8") as f:
             return json.load(f)
-    print("Descargando páginas institucionales...")
-    info = {}
-    for nombre, url in PAGINAS_INFO.items():
-        info[nombre] = scrape_pagina(url)
+    print("Descargando contenido de dslsistemas.com.ar...")
+    conocimiento = {}
+    for nombre, url in PAGINAS_DSL.items():
+        conocimiento[nombre] = scrape_pagina(url)
         print(f"  [{nombre}] OK")
-    with open(INFO_CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(info, f, ensure_ascii=False, indent=2)
-    return info
+    with open(CONOCIMIENTO_CACHE, "w", encoding="utf-8") as f:
+        json.dump(conocimiento, f, ensure_ascii=False, indent=2)
+    return conocimiento
 
 
 # ---------------------------------------------------------------------------
-# Utilidades de productos y cotizacion
+# System prompt de soporte técnico
 # ---------------------------------------------------------------------------
 
-def obtener_cotizacion() -> float:
-    try:
-        r = requests.get("https://api.bluelytics.com.ar/v2/latest", timeout=10)
-        return float(r.json()["oficial"]["value_sell"])
-    except Exception:
-        return 1404.0
+def system_prompt(conocimiento: dict) -> str:
+    secciones = "\n\n".join(
+        f"=== {nombre.upper()} ===\n{contenido}"
+        for nombre, contenido in conocimiento.items()
+        if contenido and not contenido.startswith("[No disponible")
+    )
+    base_conocimiento = f"\n\n# BASE DE CONOCIMIENTO DEL SITIO WEB\n{secciones}" if secciones else ""
 
+    return f"""Sos el agente de soporte técnico de DSL Sistemas, empresa de desarrollo de software de San Luis, Argentina.
 
-def convertir_precio(precio_raw: str, cotizacion: float) -> str:
-    try:
-        precio_usd = int(precio_raw) / 100
-        return f"${precio_usd * cotizacion:,.0f} ARS (USD {precio_usd:.2f})"
-    except Exception:
-        return "Consultar precio"
+ROL: Asistente de soporte técnico profesional. Respondés consultas sobre los servicios de DSL Sistemas, ayudás a identificar qué solución tecnológica necesita cada cliente y los guiás al canal correcto para resolver su problema.
 
+EMPRESA: DSL Sistemas
+- Especialidad: Desarrollo de software, automatización con IA, transformación digital
+- Ubicación: San Luis, Argentina
+- Experiencia: +5 años, +50 proyectos, 98% de satisfacción de clientes
 
-def descargar_productos(cotizacion: float) -> list:
-    todos = []
-    pagina = 1
-    while True:
-        try:
-            r = requests.get(BASE_URL, params={"per_page": 100, "page": pagina}, timeout=15)
-            if r.status_code != 200:
-                break
-            lote = r.json()
-            if not lote:
-                break
-            for p in lote:
-                if not p.get("is_in_stock", True):
-                    continue
-                precio_raw = p.get("prices", {}).get("price", "")
-                todos.append({
-                    "nombre": p.get("name", "Sin nombre"),
-                    "precio": convertir_precio(precio_raw, cotizacion) if precio_raw else "Consultar precio",
-                    "categoria": ", ".join(c["name"] for c in p.get("categories", [])),
-                    "url": p.get("permalink", ""),
-                })
-            if len(lote) < 100:
-                break
-            pagina += 1
-        except Exception:
-            break
-    return todos
+SERVICIOS:
+1. Gestión de Stock – control de inventario en tiempo real, multiusuario, alertas de stock mínimo
+2. Desarrollo Web – landing pages, e-commerce, sitios corporativos con SEO optimizado
+3. Automatización con IA – chatbots 24/7, automatización de procesos, análisis predictivo
+4. Aplicaciones Móviles – apps nativas para Android e iOS
+5. Sistemas SaaS – plataformas en la nube escalables (planes Starter, Profesional, Enterprise)
+6. Software a Medida – desarrollo personalizado con relevamiento, testing y soporte continuo
 
+TECNOLOGÍAS: React, Flutter, Next.js, Node.js, Python, Laravel, PostgreSQL, MongoDB, AWS, Docker
 
-def convertir_precio_ars(precio_raw: str) -> str:
-    """Convierte precio en centavos ARS a pesos formateados."""
-    try:
-        return f"${int(precio_raw) / 100:,.0f} ARS"
-    except Exception:
-        return "Consultar precio"
+PLANES SAAS:
+- Starter: hasta 3 usuarios, módulos básicos, 5 GB, soporte por email
+- Profesional: hasta 15 usuarios, todos los módulos, Business Intelligence, soporte 24/5, 50 GB, API de integraciones, módulo de IA incluido
+- Enterprise: usuarios ilimitados, desarrollo a medida, soporte dedicado 24/7, SLA garantizado, onboarding presencial
 
+CANALES DE CONTACTO:
+- Email general: info@dslsistemas.com.ar
+- Email soporte: soporte@dslsistemas.com.ar
+- Tiempo de respuesta email: menos de 24 horas hábiles
 
-def descargar_productos_todopce() -> list:
-    todos = []
-    pagina = 1
-    while True:
-        try:
-            r = requests.get(BASE_URL_TODOPCE, params={"per_page": 100, "page": pagina}, timeout=15)
-            if r.status_code != 200:
-                break
-            lote = r.json()
-            if not lote:
-                break
-            for p in lote:
-                if not p.get("is_in_stock", True):
-                    continue
-                precio_raw = p.get("prices", {}).get("price", "")
-                # Limpiar descripción corta de HTML
-                desc_raw = p.get("short_description", "") or p.get("description", "")
-                desc = BeautifulSoup(desc_raw, "html.parser").get_text(separator=" ", strip=True)[:300]
-                todos.append({
-                    "nombre": p.get("name", "Sin nombre"),
-                    "precio": convertir_precio_ars(precio_raw) if precio_raw else "Consultar precio",
-                    "categoria": ", ".join(c["name"] for c in p.get("categories", [])),
-                    "url": p.get("permalink", ""),
-                    "descripcion": desc,
-                })
-            if len(lote) < 100:
-                break
-            pagina += 1
-        except Exception:
-            break
-    return todos
-
-
-def cargar_o_actualizar_productos_todopce(forzar: bool = False) -> list:
-    if not forzar and CACHE_FILE_TODOPCE.exists():
-        with open(CACHE_FILE_TODOPCE, encoding="utf-8") as f:
-            return json.load(f)
-    productos = descargar_productos_todopce()
-    with open(CACHE_FILE_TODOPCE, "w", encoding="utf-8") as f:
-        json.dump(productos, f, ensure_ascii=False, indent=2)
-    return productos
-
-
-def cargar_info_todopce(forzar: bool = False) -> dict:
-    if not forzar and INFO_CACHE_FILE_TODOPCE.exists():
-        with open(INFO_CACHE_FILE_TODOPCE, encoding="utf-8") as f:
-            return json.load(f)
-    print("Descargando páginas institucionales TodoPCE...")
-    info = {}
-    for nombre, url in PAGINAS_INFO_TODOPCE.items():
-        info[nombre] = scrape_pagina(url)
-        print(f"  [{nombre}] OK")
-    with open(INFO_CACHE_FILE_TODOPCE, "w", encoding="utf-8") as f:
-        json.dump(info, f, ensure_ascii=False, indent=2)
-    return info
-
-
-def descargar_categorias() -> list:
-    todas = []
-    pagina = 1
-    while True:
-        try:
-            r = requests.get(BASE_URL_CATEGORIAS, params={"per_page": 100, "page": pagina}, timeout=15)
-            if r.status_code != 200:
-                break
-            lote = r.json()
-            if not lote:
-                break
-            for c in lote:
-                if c.get("count", 0) > 0:  # solo categorías con productos
-                    todas.append({
-                        "nombre": c.get("name", ""),
-                        "slug": c.get("slug", ""),
-                        "url": c.get("link", ""),
-                        "count": c.get("count", 0),
-                    })
-            if len(lote) < 100:
-                break
-            pagina += 1
-        except Exception:
-            break
-    return todas
-
-
-def cargar_o_actualizar_categorias(forzar: bool = False) -> list:
-    if not forzar and CACHE_FILE_CATEGORIAS.exists():
-        with open(CACHE_FILE_CATEGORIAS, encoding="utf-8") as f:
-            return json.load(f)
-    categorias = descargar_categorias()
-    with open(CACHE_FILE_CATEGORIAS, "w", encoding="utf-8") as f:
-        json.dump(categorias, f, ensure_ascii=False, indent=2)
-    return categorias
-
-
-def buscar_categoria(pregunta: str, categorias: list) -> dict | None:
-    """Busca la categoría más relevante para la pregunta del usuario."""
-    texto = pregunta.lower()
-    palabras = [w for w in texto.split() if w not in PALABRAS_RUIDO and len(w) > 2]
-    if not palabras:
-        return None
-    mejor = None
-    mejor_puntaje = 0
-    for cat in categorias:
-        texto_cat = (cat["nombre"] + " " + cat["slug"]).lower()
-        puntaje = sum(1 for w in palabras if w in texto_cat)
-        if puntaje > mejor_puntaje:
-            mejor_puntaje = puntaje
-            mejor = cat
-    return mejor if mejor_puntaje > 0 else None
-
-
-def cargar_o_actualizar_productos(forzar: bool = False) -> tuple[list, float]:
-    cotizacion = obtener_cotizacion()
-    if not forzar and CACHE_FILE.exists():
-        with open(CACHE_FILE, encoding="utf-8") as f:
-            productos = json.load(f)
-    else:
-        productos = descargar_productos(cotizacion)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(productos, f, ensure_ascii=False, indent=2)
-    return productos, cotizacion
-
-
-PALABRAS_PRECIO = {"económic", "economi", "barato", "barata", "bajos", "baja", "menor", "minimo", "mínimo",
-                   "caro", "cara", "alto", "mayor", "maximo", "máximo", "costoso", "costosa"}
-
-PALABRAS_RUIDO = {"cual", "cuál", "es", "la", "el", "lo", "los", "las", "que", "tienen", "hay",
-                  "más", "mas", "me", "un", "una", "de", "para", "con", "por", "del", "al",
-                  "busco", "quiero", "necesito", "tienen", "tengo", "ver", "mostrar", "dame"}
-
-def _precio_numerico(p: dict) -> float:
-    """Extrae precio numérico del string formateado para poder ordenar."""
-    try:
-        return float(p["precio"].replace("$", "").replace(".", "").replace(",", ".").split()[0])
-    except Exception:
-        return float("inf")
-
-def buscar_productos(pregunta: str, productos: list, max_resultados: int = 15) -> list:
-    texto_pregunta = pregunta.lower()
-    palabras = texto_pregunta.split()
-
-    # Detectar si es consulta de comparación de precios
-    es_consulta_precio = any(kw in texto_pregunta for kw in PALABRAS_PRECIO)
-
-    # Palabras de búsqueda = sin ruido ni palabras de precio
-    palabras_busqueda = [w for w in palabras
-                         if w not in PALABRAS_RUIDO and w not in PALABRAS_PRECIO and len(w) > 2]
-
-    # Si no quedan palabras útiles, usar todas
-    if not palabras_busqueda:
-        palabras_busqueda = [w for w in palabras if len(w) > 3]
-
-    resultados = []
-    for p in productos:
-        texto = (p["nombre"] + " " + p["categoria"]).lower()
-        puntaje = sum(1 for w in palabras_busqueda if w in texto)
-        if puntaje > 0:
-            resultados.append((puntaje, p))
-
-    # Para consultas de precio, ordenar los matches más relevantes por precio
-    if es_consulta_precio and resultados:
-        puntaje_max = max(p for p, _ in resultados)
-        # Solo tomar productos con el puntaje máximo (los que más coinciden con lo buscado)
-        relevantes = [p for puntaje, p in resultados if puntaje == puntaje_max]
-        ascendente = not any(w in texto_pregunta for w in ["caro", "cara", "alto", "mayor", "maximo", "máximo", "costoso", "costosa"])
-        relevantes.sort(key=_precio_numerico, reverse=not ascendente)
-        return relevantes[:20]
-
-    resultados.sort(key=lambda x: x[0], reverse=True)
-    return [p for _, p in resultados[:max_resultados]]
-
-
-# ---------------------------------------------------------------------------
-# Sistema prompt comercial
-# ---------------------------------------------------------------------------
-
-def system_prompt(cotizacion: float, info: dict = None) -> str:
-    if info:
-        secciones = "\n\n".join(
-            f"=== {nombre.upper()} ===\n{contenido}"
-            for nombre, contenido in info.items()
-            if contenido and not contenido.startswith("[No disponible")
-        )
-        info_section = f"\n# INFORMACIÓN INSTITUCIONAL DEL SITIO\nUsá este contenido para responder consultas sobre contacto, envíos, devoluciones y locales:\n\n{secciones}" if secciones else ""
-    else:
-        info_section = ""
-
-    return f"""Sos el asistente virtual de Distribuciones San Luis, distribuidor mayorista de tecnología en Argentina.
-
-ROL: Vendedor digital profesional + asesor comercial. No solo respondés: vendés.
-
-IMPORTANTE SOBRE EL CATÁLOGO:
-- El sistema te provee los productos relevantes para cada consulta directamente en el mensaje
-- Cuando se trata de comparar precios (más económico, más barato, etc.), los productos ya vienen ordenados por precio de menor a mayor
-- Nunca digas que no tenés acceso al catálogo — los productos disponibles son exactamente los que aparecen en el contexto de cada mensaje
-- Si no aparece un producto en el contexto, ofrecé las opciones que sí tenés disponibles
-
-REGLAS COMERCIALES:
-- Compra mínima: $80.000 ARS
-- Contacto WhatsApp para cerrar pedidos: +54 2664583129
-- Local físico: Rivadavia 1005, San Luis Capital, CP 5700
-- Cuando el cliente pregunte por dirección, horarios o cómo llegar, dar la dirección del local y sugerir confirmar horarios por WhatsApp
-- Precios en pesos argentinos usando cotización Banco Nación: ${cotizacion:.0f} por dólar
-- Mostrar siempre precio en ARS cuando esté disponible
-- Siempre incluir el link del producto cuando lo mencionés, como: Ver producto: nombre (url)
-- Nunca inventar precios, stock ni promociones no confirmadas
-- Si no tenés el dato, decilo y ofrecé verificar
-
-CLASIFICACIÓN DE INTENCIÓN (detectar en cada mensaje):
-- consulta_precio | consulta_tecnica | comparacion | stock | medios_pago | envios | reventa | cierre | reclamo | saludo
-
-TEMPERATURA DEL LEAD:
-- Frío: consulta general → educar, orientar, no presionar
-- Tibio: preguntas específicas → resolver objeciones, propuesta concreta
-- Caliente: pregunta precio/stock/pago → responder rápido, microcerrar, facilitar cierre
-
-ESTRUCTURA DE RESPUESTA COMERCIAL:
-1. Apertura natural
-2. Respuesta clara con precio si aplica
-3. Beneficio concreto
-4. Microcierre ("¿Querés que te pase disponibilidad y medios de pago?")
-
-MODO REVENDEDOR: Si detectás intención de reventa, hablar de margen, rotación y volumen.
-
-DERIVACIÓN A HUMANO: Si hay reclamo complejo, negociación fuera de política o el usuario lo pide.
-
-LONGITUD DE RESPUESTA: Máximo 3-4 oraciones por mensaje. Estás en WhatsApp, no escribiendo un email. Sin listas largas, sin encabezados. Si hay muchos productos, mencioná los 2-3 más relevantes.
-
-Respondé siempre en español, tono profesional pero cercano, nunca robótico.
-
-{info_section}"""
-
-
-def system_prompt_messenger(info: dict = None) -> str:
-    if info:
-        secciones = "\n\n".join(
-            f"=== {nombre.upper()} ===\n{contenido}"
-            for nombre, contenido in info.items()
-            if contenido and not contenido.startswith("[No disponible")
-        )
-        info_section = f"\n# INFORMACIÓN DEL SITIO\n{secciones}" if secciones else ""
-    else:
-        info_section = ""
-
-    return f"""Sos el asistente virtual de TodoPCE, tienda de tecnología en Argentina para consumidores finales.
-
-ROL: Asesor de ventas amigable. Respondés consultas sobre productos, precios, características y envíos. Para cerrar una venta o atención personalizada, derivás al asesor humano.
-
-CATÁLOGO:
-- Los productos relevantes aparecen en el contexto del mensaje con nombre, precio, URL y descripción
-- Usá la descripción para responder preguntas sobre características del producto
-- Siempre incluí el link del producto: nombre (url)
-- Nunca inventar precios, stock ni características
-
-ENVÍOS:
-- Sí realizamos envíos a todo el país
-- Para consultar costo y tiempo de envío a su localidad, derivar al WhatsApp: +54 2664583129
-
-ASESOR HUMANO:
-- Si el cliente quiere comprar, necesita factura, tiene una consulta compleja o pide atención personalizada → derivar al WhatsApp: +54 2664583129
+CRITERIOS DE DERIVACIÓN A HUMANO:
+- SOLO derivar a un humano cuando el problema no se puede resolver por este canal
+- Cuando sea necesario derivar, el contacto es ÚNICAMENTE: WhatsApp soporte humano +54 266 5258519
+- NUNCA mencionar ni dar el número +54 266 458-3129 (es exclusivo de ventas, no de soporte)
+- Para consultas sobre nuevos servicios o contrataciones → derivar a soporte@dslsistemas.com.ar
 
 REGLAS:
-- Sin compra mínima
-- Precios en pesos argentinos (ARS)
-- Nunca inventar datos
+- Nunca inventar precios, características ni plazos de entrega no confirmados
+- Los precios de los planes son a consultar; no dar valores específicos
+- Siempre intentá resolver el problema antes de derivar a un humano
+- Acompañá al usuario paso a paso hasta encontrar la solución
+- Solo derivar a humano cuando agotaste las posibilidades de resolver por este canal
+- Escuchá bien la necesidad antes de proponer una solución
 
-LONGITUD: Máximo 3-4 oraciones. Estás en Messenger. Sin listas largas. Si hay varios productos mencioná los 2 más relevantes.
+LONGITUD DE RESPUESTA: Conciso y claro. Máximo 4-5 oraciones por respuesta. Estás en un canal de chat, no escribiendo un informe. Si necesitás listar opciones, usá máximo 3 puntos concretos.
 
-Respondé siempre en español, tono amigable y cercano.
-
-{info_section}"""
+Respondé siempre en español, tono profesional y cercano, nunca robótico.
+{base_conocimiento}"""
 
 
 # ---------------------------------------------------------------------------
@@ -435,64 +149,29 @@ Respondé siempre en español, tono amigable y cercano.
 
 @app.on_event("startup")
 async def startup():
-    try:
-        productos, cotizacion = cargar_o_actualizar_productos()
-        estado["productos"] = productos
-        estado["cotizacion"] = cotizacion
-        print(f"[OK] {len(productos)} productos cargados | Dólar: ${cotizacion:.0f}")
-    except Exception as e:
-        print(f"[WARN] Error cargando productos: {e}")
-    try:
-        estado["info"] = cargar_info_institucional()
-        print(f"[OK] Info institucional cargada ({len(estado['info'])} secciones)")
-    except Exception as e:
-        print(f"[WARN] Error cargando info institucional: {e}")
-    try:
-        estado["categorias"] = cargar_o_actualizar_categorias()
-        print(f"[OK] {len(estado['categorias'])} categorías cargadas")
-    except Exception as e:
-        print(f"[WARN] Error cargando categorías: {e}")
     import asyncio
 
-    async def cargar_todopce_background():
-        """Carga datos de TodoPCE en background para no bloquear el startup."""
-        await asyncio.sleep(5)
-        try:
-            estado["productos_todopce"] = cargar_o_actualizar_productos_todopce()
-            print(f"[OK] {len(estado['productos_todopce'])} productos TodoPCE cargados")
-        except Exception as e:
-            print(f"[WARN] Error cargando productos TodoPCE: {e}")
-        try:
-            estado["info_todopce"] = cargar_info_todopce()
-            print(f"[OK] Info TodoPCE cargada ({len(estado['info_todopce'])} secciones)")
-        except Exception as e:
-            print(f"[WARN] Error cargando info TodoPCE: {e}")
+    try:
+        estado["conocimiento"] = cargar_conocimiento()
+        print(f"[OK] Base de conocimiento DSL cargada ({len(estado['conocimiento'])} secciones)")
+    except Exception as e:
+        print(f"[WARN] Error cargando conocimiento DSL: {e}")
 
-    asyncio.create_task(cargar_todopce_background())
-
-    async def actualizar_cada_12h():
+    async def actualizar_cada_24h():
         while True:
-            await asyncio.sleep(12 * 60 * 60)
+            await asyncio.sleep(24 * 60 * 60)
             try:
-                productos, cotizacion = cargar_o_actualizar_productos(forzar=True)
-                estado["productos"] = productos
-                estado["cotizacion"] = cotizacion
-                estado["info"] = cargar_info_institucional(forzar=True)
-                estado["categorias"] = cargar_o_actualizar_categorias(forzar=True)
-                estado["productos_todopce"] = cargar_o_actualizar_productos_todopce(forzar=True)
-                estado["info_todopce"] = cargar_info_todopce(forzar=True)
-                print(f"[AUTO] Actualización: {len(productos)} San Luis | {len(estado['productos_todopce'])} TodoPCE | Dólar: ${cotizacion:.0f}")
+                estado["conocimiento"] = cargar_conocimiento(forzar=True)
+                print(f"[AUTO] Base de conocimiento actualizada: {len(estado['conocimiento'])} secciones")
             except Exception as e:
                 print(f"[WARN] Error en actualización automática: {e}")
 
-    asyncio.create_task(actualizar_cada_12h())
+    asyncio.create_task(actualizar_cada_24h())
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-
-WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "antigravity2024")
 
 @app.get("/whatsapp")
 async def whatsapp_verify(request: Request):
@@ -516,10 +195,7 @@ async def webhook_verify(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    html = CHAT_HTML.read_text(encoding="utf-8")
-    html = html.replace("{{ total_productos }}", str(len(estado["productos"])))
-    html = html.replace("{{ cotizacion }}", f"{estado['cotizacion']:.0f}")
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=CHAT_HTML.read_text(encoding="utf-8"))
 
 
 @app.post("/chat")
@@ -535,30 +211,17 @@ async def chat(request: Request):
         sesiones[session_id] = []
 
     historial = sesiones[session_id]
-
-    # Buscar productos relevantes
-    relevantes = buscar_productos(mensaje, estado["productos"])
-    if relevantes:
-        contexto = "\n".join(
-            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {sanitize_str(p['categoria'])} | {p['url']}"
-            for p in relevantes
-        )
-        contenido_usuario = f"{mensaje}\n\n[Productos relevantes encontrados]\n{contexto}"
-    else:
-        contenido_usuario = f"{mensaje}\n\n[Sin productos específicos. Sugerir contacto por WhatsApp si corresponde.]"
-
-    historial.append({"role": "user", "content": contenido_usuario})
+    historial.append({"role": "user", "content": mensaje})
 
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=400,
-            system=system_prompt(estado["cotizacion"], estado["info"]),
+            max_tokens=500,
+            system=system_prompt(estado["conocimiento"]),
             messages=historial,
         )
         texto = respuesta.content[0].text
         historial.append({"role": "assistant", "content": texto})
-        # Limitar historial a 20 turnos para no crecer indefinidamente
         if len(historial) > 40:
             sesiones[session_id] = historial[-40:]
         return JSONResponse({"respuesta": texto, "session_id": session_id})
@@ -569,9 +232,8 @@ async def chat(request: Request):
 @app.get("/status")
 async def status():
     return {
-        "productos": len(estado["productos"]),
-        "cotizacion": estado["cotizacion"],
         "sesiones_activas": len(sesiones),
+        "secciones_conocimiento": list(estado["conocimiento"].keys()),
     }
 
 
@@ -600,11 +262,9 @@ async def whatsapp_webhook(request: Request):
     except Exception:
         return PlainTextResponse("ok")
 
-    # Extraer mensaje del payload de Meta
     try:
         entry = data["entry"][0]
         change = entry["changes"][0]["value"]
-        # Ignorar notificaciones de estado (delivered, read, etc.)
         if "messages" not in change:
             return PlainTextResponse("ok")
         msg = change["messages"][0]
@@ -619,12 +279,10 @@ async def whatsapp_webhook(request: Request):
     if not mensaje:
         return PlainTextResponse("ok")
 
-    # Anti-duplicados: ignorar si ya procesamos este mensaje
     if msg_id and msg_id in mensajes_vistos:
         return PlainTextResponse("ok")
     if msg_id:
         mensajes_vistos.add(msg_id)
-        # Limpiar el set si crece demasiado (evitar memory leak)
         if len(mensajes_vistos) > 10000:
             mensajes_vistos.clear()
 
@@ -632,32 +290,19 @@ async def whatsapp_webhook(request: Request):
         sesiones[numero] = []
 
     historial = sesiones[numero]
-    relevantes = buscar_productos(mensaje, estado["productos"])
-
-    if relevantes:
-        contexto = "\n".join(
-            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {sanitize_str(p['categoria'])} | {p['url']}"
-            for p in relevantes
-        )
-        contenido = f"{mensaje}\n\n[Productos relevantes]\n{contexto}"
-    else:
-        contenido = f"{mensaje}\n\n[Sin productos específicos. Sugerir contacto por WhatsApp si corresponde.]"
-
-    historial.append({"role": "user", "content": contenido})
+    historial.append({"role": "user", "content": mensaje})
 
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=400,
-            system=system_prompt(estado["cotizacion"], estado["info"]),
+            max_tokens=500,
+            system=system_prompt(estado["conocimiento"]),
             messages=historial,
         )
         texto = respuesta.content[0].text
         historial.append({"role": "assistant", "content": texto})
-
         if len(historial) > 40:
             sesiones[numero] = historial[-40:]
-
         enviar_meta(numero, texto)
     except Exception as e:
         print(f"[ERROR whatsapp] {e}")
@@ -705,7 +350,6 @@ async def messenger_webhook(request: Request):
         if "message" not in messaging:
             return PlainTextResponse("ok")
         msg = messaging["message"]
-        # Ignorar mensajes del propio bot (eco)
         if msg.get("is_echo"):
             return PlainTextResponse("ok")
         msg_id = msg.get("mid", "")
@@ -716,7 +360,6 @@ async def messenger_webhook(request: Request):
     if not mensaje:
         return PlainTextResponse("ok")
 
-    # Anti-duplicados
     if msg_id and msg_id in mensajes_vistos:
         return PlainTextResponse("ok")
     if msg_id:
@@ -729,33 +372,19 @@ async def messenger_webhook(request: Request):
         sesiones[session_key] = []
 
     historial = sesiones[session_key]
-    relevantes = buscar_productos(mensaje, estado["productos_todopce"])
-
-    if relevantes:
-        contexto = "\n".join(
-            f"- {sanitize_str(p['nombre'])} | {p['precio']} | {p['url']}"
-            + (f" | {sanitize_str(p['descripcion'])}" if p.get("descripcion") else "")
-            for p in relevantes
-        )
-        contenido = f"{mensaje}\n\n[Productos relevantes]\n{contexto}"
-    else:
-        contenido = f"{mensaje}\n\n[Sin productos específicos. Sugerir contacto por WhatsApp si corresponde.]"
-
-    historial.append({"role": "user", "content": contenido})
+    historial.append({"role": "user", "content": mensaje})
 
     try:
         respuesta = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=400,
-            system=system_prompt_messenger(estado["info_todopce"]),
+            max_tokens=500,
+            system=system_prompt(estado["conocimiento"]),
             messages=historial,
         )
         texto = respuesta.content[0].text
         historial.append({"role": "assistant", "content": texto})
-
         if len(historial) > 40:
             sesiones[session_key] = historial[-40:]
-
         enviar_messenger(psid, texto)
     except Exception as e:
         print(f"[ERROR messenger] {e}")
@@ -765,12 +394,12 @@ async def messenger_webhook(request: Request):
 
 @app.post("/actualizar")
 async def actualizar():
-    """Fuerza recarga de productos, cotización e info institucional."""
-    productos, cotizacion = cargar_o_actualizar_productos(forzar=True)
-    estado["productos"] = productos
-    estado["cotizacion"] = cotizacion
-    estado["info"] = cargar_info_institucional(forzar=True)
-    return {"productos": len(productos), "cotizacion": cotizacion, "secciones_info": list(estado["info"].keys())}
+    """Fuerza recarga del contenido del sitio web de DSL Sistemas."""
+    estado["conocimiento"] = cargar_conocimiento(forzar=True)
+    return {
+        "secciones": list(estado["conocimiento"].keys()),
+        "mensaje": "Base de conocimiento actualizada correctamente",
+    }
 
 
 # ---------------------------------------------------------------------------

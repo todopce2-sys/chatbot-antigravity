@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Distribuciones San Luis – Asistente Virtual</title>
+  <title>DSL Sistemas – Soporte Técnico</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -16,7 +16,7 @@
     }
 
     header {
-      background: #1a1a2e;
+      background: #0f172a;
       color: #fff;
       padding: 14px 20px;
       display: flex;
@@ -26,7 +26,7 @@
     }
 
     header .brand { font-size: 1.1rem; font-weight: 600; }
-    header .meta  { font-size: 0.78rem; color: #a0aec0; }
+    header .meta  { font-size: 0.78rem; color: #94a3b8; }
 
     #chat-container {
       flex: 1;
@@ -55,7 +55,7 @@
     }
 
     .msg.user {
-      background: #4f46e5;
+      background: #0ea5e9;
       color: #fff;
       align-self: flex-end;
       border-bottom-right-radius: 2px;
@@ -99,10 +99,10 @@
       line-height: 1.4;
     }
 
-    #input-msg:focus { border-color: #4f46e5; }
+    #input-msg:focus { border-color: #0ea5e9; }
 
     #btn-send {
-      background: #4f46e5;
+      background: #0ea5e9;
       color: #fff;
       border: none;
       border-radius: 8px;
@@ -114,21 +114,8 @@
       white-space: nowrap;
     }
 
-    #btn-send:hover   { background: #4338ca; }
-    #btn-send:disabled { background: #a5b4fc; cursor: not-allowed; }
-
-    #btn-actualizar {
-      background: none;
-      border: 1px solid #cbd5e0;
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-size: 0.8rem;
-      cursor: pointer;
-      color: #718096;
-      transition: all 0.2s;
-    }
-
-    #btn-actualizar:hover { border-color: #4f46e5; color: #4f46e5; }
+    #btn-send:hover    { background: #0284c7; }
+    #btn-send:disabled { background: #7dd3fc; cursor: not-allowed; }
 
     @media (max-width: 600px) {
       .msg { max-width: 90%; }
@@ -138,26 +125,24 @@
 <body>
 
 <header>
-  <div class="brand">Distribuciones San Luis</div>
-  <div class="meta">{{ total_productos }} productos · Dólar ${{ cotizacion }}</div>
+  <div class="brand">DSL Sistemas · Soporte Técnico</div>
+  <div class="meta">San Luis, Argentina · soporte@dslsistemas.com.ar</div>
 </header>
 
 <div id="chat-container">
-  <div class="msg bot">¡Hola! 👋 Soy el asistente virtual de Distribuciones San Luis.
-Decime qué estás buscando y te ayudo con precio, recomendación o disponibilidad.</div>
+  <div class="msg bot">Hola, soy el asistente de soporte técnico de DSL Sistemas.
+Contame en qué puedo ayudarte hoy: consultas sobre nuestros servicios, sistemas, planes o cualquier problema técnico.</div>
 </div>
 
 <div id="input-area">
-  <button id="btn-actualizar" title="Actualizar precios y catálogo">↻ Actualizar</button>
   <textarea id="input-msg" rows="1" placeholder="Escribí tu consulta..."></textarea>
   <button id="btn-send">Enviar</button>
 </div>
 
 <script>
-  const chatEl   = document.getElementById("chat-container");
-  const inputEl  = document.getElementById("input-msg");
-  const sendBtn  = document.getElementById("btn-send");
-  const actuBtn  = document.getElementById("btn-actualizar");
+  const chatEl  = document.getElementById("chat-container");
+  const inputEl = document.getElementById("input-msg");
+  const sendBtn = document.getElementById("btn-send");
 
   let sessionId = null;
 
@@ -214,25 +199,9 @@ Decime qué estás buscando y te ayudo con precio, recomendación o disponibilid
     }
   });
 
-  // Auto-resize textarea
   inputEl.addEventListener("input", () => {
     inputEl.style.height = "auto";
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
-  });
-
-  actuBtn.addEventListener("click", async () => {
-    actuBtn.disabled = true;
-    actuBtn.textContent = "Actualizando...";
-    try {
-      const res = await fetch("/actualizar", { method: "POST" });
-      const data = await res.json();
-      addMsg(`Catálogo actualizado: ${data.productos} productos · Dólar $${Math.round(data.cotizacion)}`, "bot");
-    } catch (e) {
-      addMsg("No se pudo actualizar el catálogo.", "error");
-    } finally {
-      actuBtn.disabled = false;
-      actuBtn.textContent = "↻ Actualizar";
-    }
   });
 </script>
 
